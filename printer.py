@@ -330,18 +330,20 @@ class PrinterDriver(Commander):
     def connect(self, name=None, address=None):
         ''' Connect to this device, and operate on it
         '''
+        print(f"Attempting to connect to device: {name}, {address}...")
         self._pending_data = io.BytesIO()
         if self.fake:
             return
         if (self.device is not None and address is not None and
             (self.device.address.lower() == address.lower())):
+            print("Device already connected.")
             return
         try:
             if self.device is not None and self.device.is_connected:
                 self.loop(self.device.stop_notify(self.rx_characteristic))
                 self.loop(self.device.disconnect())
-        except:     # pylint: disable=bare-except
-            pass
+        except Exception as e:  # Catching all exceptions can be too broad, but for debugging, it's okay.
+            print(f"Error while disconnecting from a previously connected device: {e}")
         finally:
             self.device = None
         if name is None and address is None:
@@ -353,50 +355,73 @@ class PrinterDriver(Commander):
                 self._paused = True
             elif data == self.data_flow_resume:
                 self._paused = False
-        self.loop(
-            self.device.connect(timeout=self.connection_timeout),
-            self.device.start_notify(self.rx_characteristic, notify)
-        )
+        try:
+            self.loop(
+                self.device.connect(timeout=self.connection_timeout),
+                self.device.start_notify(self.rx_characteristic, notify)
+            )
+            print(f"Successfully connected to {name}.")
+        except Exception as e:
+            print(f"Error during connection to {name}: {e}")
+            raise e
 
     def scan(self, identifier: str=None, *, use_result=False, everything=False):
-        ''' Scan for supported devices, optionally filter with `identifier`,
-            which can be device model (bluetooth name), and optionally MAC address, after a comma.
-            If `use_result` is True, connect to the first available device to driver instantly.
-            If `everything` is True, return all bluetooth devices found.
-            Note: MAC address doesn't work on Apple MacOS. In place with it,
-            You need an UUID of BLE device dynamically given by MacOS.
-        '''
-        if self.fake:
-            return []
-        if everything:
-            devices = self.loop(BleakScanner.discover(self.scan_time))
+        try:
+            print("Starting scan...")
+
+            if self.fake:
+                print("Using fake mode.")
+                return []
+
+            if everything:
+                print("About to start BleakScanner discovery...")
+                devices = self.loop(BleakScanner.discover(self.scan_time))
+                print(f"Discovered {len(devices)} devices.")
+                return devices
+
+            if identifier:
+                print(f"Scanning with identifier: {identifier}")
+
+                if identifier.find(',') != -1:
+                    name, address = identifier.split(',')
+                    if name not in Models:
+                        error('model-0-is-not-supported-yet', name, exception=PrinterError)
+
+                    if address[2::3] != ':::::' and len(address.replace('-', '')) != 32:
+                        error('invalid-address-0', address, exception=PrinterError)
+
+                    if use_result:
+                        self.connect(name, address)
+                    return [BLEDevice(address, name)]
+
+                if (identifier not in Models and
+                    identifier[2::3] != ':::::' and len(identifier.replace('-', '')) != 32):
+                    error('model-0-is-not-supported-yet', identifier, exception=PrinterError)
+
+            print("Scanning for supported models...")
+            devices = [x for x in self.loop(
+                BleakScanner.discover(self.scan_time)
+            ) if x.name in Models]
+
+            if identifier:
+                print(f"Filtering devices for identifier: {identifier}")
+
+                if identifier in Models:
+                    devices = [dev for dev in devices if dev.name == identifier]
+                else:
+                    devices = [dev for dev in devices if dev.address.lower() == identifier.lower()]
+
+            if use_result and len(devices) != 0:
+                print(f"Connecting to first device found: {devices[0].name}, {devices[0].address}")
+                self.connect(devices[0].name, devices[0].address)
+
+            print(f"Found {len(devices)} devices.")
             return devices
-        if identifier:
-            if identifier.find(',') != -1:
-                name, address = identifier.split(',')
-                if name not in Models:
-                    error('model-0-is-not-supported-yet', name, exception=PrinterError)
-                # TODO: is this logic correct?
-                if address[2::3] != ':::::' and len(address.replace('-', '')) != 32:
-                    error('invalid-address-0', address, exception=PrinterError)
-                if use_result:
-                    self.connect(name, address)
-                return [BLEDevice(address, name)]
-            if (identifier not in Models and
-                identifier[2::3] != ':::::' and len(identifier.replace('-', '')) != 32):
-                error('model-0-is-not-supported-yet', identifier, exception=PrinterError)
-        # scanner = BleakScanner()
-        devices = [x for x in self.loop(
-            BleakScanner.discover(self.scan_time)
-        ) if x.name in Models]
-        if identifier:
-            if identifier in Models:
-                devices = [dev for dev in devices if dev.name == identifier]
-            else:
-                devices = [dev for dev in devices if dev.address.lower() == identifier.lower()]
-        if use_result and len(devices) != 0:
-            self.connect(devices[0].name, devices[0].address)
-        return devices
+
+        except Exception as e:
+            print(f"Error during scan: {e}")
+            raise e
+
 
     def print(self, file: io.BufferedIOBase, *, mode='default',
               identifier: str=None):

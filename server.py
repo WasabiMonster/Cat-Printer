@@ -12,6 +12,7 @@ import os
 import io
 import sys
 import json
+import traceback
 import warnings
 import webbrowser
 
@@ -153,7 +154,9 @@ class PrinterServerHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(body_json).encode('utf-8'))
 
     def api_fail(self, error_json):
-        'Called when an API call is failed'
+        'Called when an API call failed'
+        print(f"Error: {error_json['name']}", file=sys.stderr)
+        print(f"Details: {error_json['details']}", file=sys.stderr)
         self.send_response(500)
         self.send_header('Content-Type', mime('json'))
         self.end_headers()
@@ -211,6 +214,9 @@ class PrinterServerHandler(BaseHTTPRequestHandler):
 
     def handle_api(self):
         'Handle API request from POST'
+
+        print(f"Handling API call for endpoint: {self.path}")
+
         content_length = int(self.headers.get('Content-Length'))
         body = self.rfile.read(content_length)
         api = self.path[1:]
@@ -220,16 +226,30 @@ class PrinterServerHandler(BaseHTTPRequestHandler):
             self.api_success()
             return
         data = DictAsObject(json.loads(body))
+
         if api == 'devices':
+            print("Handling /devices endpoint...")
             self.printer.connect(None)
-            devices_list = [{
-                'name': device.name,
-                'address': device.address
-            } for device in self.printer.scan(everything=data.get('everything'))]
+            print("Partially Connected to printer...")
+            try:
+                devices_list = [{
+                    'name': device.name,
+                    'address': device.address
+                } for device in self.printer.scan(everything=data.get('everything'))]
+                print(f"Scanned devices: {devices_list}")
+            except Exception as e:
+                print(f"Error during scanning or constructing device list: {e}")
+                self.api_fail({
+                    'name': 'ScanError',
+                    'details': str(e)
+                })
+                return
             self.api_success({
                 'devices': devices_list
             })
+            print("Successfully responded to /devices request.")
             return
+
         if api == 'query':
             self.load_config()
             self.api_success(self.settings)
@@ -257,6 +277,9 @@ class PrinterServerHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         'Called when server got a POST http request'
+
+        print(f"Received POST request for path: {self.path}")
+        
         content_length = int(self.headers.get('Content-Length', -1))
         if (content_length < -1 or
             content_length > self.max_payload
@@ -302,6 +325,7 @@ class PrinterServerHandler(BaseHTTPRequestHandler):
                 'name': 'Exception',
                 'details': str(e)
             })
+            traceback.print_exc()  # Print detailed exception info to console
             raise
 
 class PrinterServer(HTTPServer):
@@ -333,36 +357,55 @@ class PrinterServer(HTTPServer):
             self.handler.exit()
         super().server_close()
 
-
 def serve():
     'Start server'
     address, port = '127.0.0.1', 8095
     listen_all = False
-    if '-a' in sys.argv:
-        info(i18n('will-listen-on-all-addresses'))
-        listen_all = True
-    server = PrinterServer(('' if listen_all else address, port), PrinterServerHandler)
-    service_url = f'http://{address}:{port}/'
-    
 
-    info(i18n('serving-at-0', service_url))
-    if '-s' not in sys.argv and not IsAndroid:
-        webbrowser.open(service_url)
-    # Request required bluetooth permissions (Android 12+)
-    if IsAndroid:
-        from android.permissions import request_permissions, Permission
-        try:
-            request_permissions([Permission.BLUETOOTH_SCAN, Permission.BLUETOOTH_CONNECT])
-        except Exception:
-            print('Exception on requesting Android Permissions. Continuing', file=sys.stderr)
-            pass
-        from android.app import Activity
-        from android.content import Intent
-        print(Intent.getIntent().getType())
-    
     try:
+        print("Starting server...")
+        
+        if '-a' in sys.argv:
+            info(i18n('will-listen-on-all-addresses'))
+            listen_all = True
+        server = PrinterServer(('' if listen_all else address, port), PrinterServerHandler)
+        service_url = f'http://{address}:{port}/'
+
+        print("Server initialized. Address:", service_url)
+
+        info(i18n('serving-at-0', service_url))
+        if '-s' not in sys.argv and not IsAndroid:
+            webbrowser.open(service_url)
+
+        print("Initiating Bluetooth scan...")
+        handler = server.handler
+        if handler:
+            handler.printer.connect(None)
+            handler.printer.scan()
+
+        print("Bluetooth scan completed.")
+
+        # Request required Bluetooth permissions (Android 12+)
+        if IsAndroid:
+            from android.permissions import request_permissions, Permission
+            try:
+                request_permissions([Permission.BLUETOOTH_SCAN, Permission.BLUETOOTH_CONNECT])
+            except Exception:
+                print('Exception on requesting Android Permissions. Continuing', file=sys.stderr)
+                pass
+            from android.app import Activity
+            from android.content import Intent
+            print(Intent.getIntent().getType())
+
+        print("Entering server loop...")
         server.serve_forever()
+
+    except Exception as e:
+        print(f"An exception occurred: {e}")
+        raise  # re-raise the exception to see its traceback
+
     except KeyboardInterrupt:
+        print("Received KeyboardInterrupt. Closing server...")
         server.server_close()
 
 if __name__ == '__main__':
