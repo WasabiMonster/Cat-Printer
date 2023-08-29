@@ -108,6 +108,13 @@ class PrinterServerHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         'Called when server got a GET http request'
+            # Check for the /health endpoint
+        if self.path == "/health":
+            self.send_response(200)
+            self.send_header('Content-Type', mime('txt'))
+            self.end_headers()
+            self.wfile.write(b'Server is healthy!')
+            return
         # prepare
         path, _, _args = self.path.partition('?')
         if '/..' in path or '../' in path:
